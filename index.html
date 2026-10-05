@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Пиксельный Ниндзя</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1025;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: 'Courier New', monospace;
+    overflow: hidden;
+  }
+  canvas {
+    border: 2px solid #f4a;
+    box-shadow: 0 0 40px #f4a8;
+    border-radius: 8px;
+    image-rendering: pixelated;
+    display: block;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="640" height="360"></canvas>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const GROUND_Y = H - 60;
+const GRAVITY = 0.9;
+
+// === Состояние ===
+let state = 'menu'; // menu | playing | gameover
+let score = 0, best = +localStorage.getItem('ninjaBest') || 0;
+let lives = 3;
+let frame = 0;
+let worldSpeed = 5;
+let distance = 0;
+
+// Параллакс-фон
+const mountains = [];
+for (let i = 0; i < 6; i++) {
+  mountains.push({ x: i * 150, h: 80 + Math.random() * 60, w: 180 });
+}
+const clouds = Array.from({length: 8}, () => ({
+  x: Math.random() * W, y: 20 + Math.random() * 100,
+  s: 0.3 + Math.random() * 0.3
+}));
+
+const player = {
+  x: 120,
+  y: GROUND_Y,
+  w: 28,
+  h: 42,
+  vy: 0,
+  onGround: true,
+  jumps: 0,
+  sliding: false,
+  slideTimer: 0,
+  attacking: false,
+  attackTimer: 0,
+  invuln: 0,
+  runFrame: 0
+};
+
+let platforms = [];
+let enemies = [];
+let scrolls = [];
+let particles = [];
+let groundOffset = 0;
+
+const keys = {};
+addEventListener('keydown', e => {
+  if ([' ', 'ArrowUp', 'ArrowDown', 'Shift', 'x', 'X'].includes(e.key)) e.preventDefault();
+  if (!keys[e.key]) {
+    if (e.key === ' ' || e.key === 'ArrowUp') tryJump();
+    if (e.key === 'Shift' || e.key === 'ArrowDown') trySlide();
+    if (e.key === 'x' || e.key === 'X') tryAttack();
+    if ((e.key === ' ' || e.key === 'Enter') && (state === 'menu' || state === 'gameover')) startGame();
+  }
+  keys[e.key] = true;
+});
+addEventListener('keyup', e => { keys[e.key] = false; });
+canvas.addEventListener('click', () => {
+  if (state === 'menu' || state === 'gameover') startGame();
+});
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (state === 'menu' || state === 'gameover') startGame();
+  else tryJump();
+}, {passive:false});
+
+function tryJump() {
+  if (state !== 'playing') return;
+  if (player.jumps < 2) {
+    player.vy = -14;
+    player.onGround = false;
+    player.jumps++;
+    for (let i = 0; i < 6; i++) spawnParticle(player.x, player.y, '#8cf');
+  }
+}
+
+function trySlide() {
+  if (state !== 'playing' || !player.onGround) return;
+  player.sliding = true;
+  player.slideTimer = 25;
+}
+
+function tryAttack() {
+  if (state !== 'playing') return;
+  player.attacking = true;
+  player.attackTimer = 12;
+}
+
+function spawnParticle(x, y, color) {
+  particles.push({
+    x, y,
+    vx: (Math.random() - 0.5) * 4,
+    vy: (Math.random() - 0.5) * 4,
+    life: 20,
+    color,
+    size: 2 + Math.random() * 2
+  });
+}
+
+function startGame() {
+  score = 0; lives = 3; frame = 0;
+  worldSpeed = 5; distance = 0;
+  platforms = []; enemies = []; scrolls = []; particles = [];
+  player.y = GROUND_Y;
+  player.vy = 0;
+  player.onGround = true;
+  player.jumps = 0;
+  player.sliding = false;
+  player.attacking = false;
+  player.invuln = 60;
+  groundOffset = 0;
+  // Стартовая платформа
+  platforms.push({ x: 0, y: GROUND_Y + 20, w: W * 2, h: 40 });
+  state = 'playing';
+}
+
+function spawnObstacles() {
+  const last = platforms[platforms.length - 1];
+  const gap = 80 + Math.random() * 120;
+  const pw = 150 + Math.random() * 200;
+
+  // Новая платформа
+  platforms.push({
+    x: last.x + last.w + gap,
+    y: GROUND_Y + 20,
+    w: pw,
+    h: 40
+  });
+
+  // Враг на платформе
+  if (Math.random() < 0.5 && pw > 200) {
+    enemies.push({
+      x: last.x + last.w + gap + 60 + Math.random() * (pw - 120),
+      y: GROUND_Y - 30,
+      w: 24, h: 30,
+      alive: true,
+      frame: 0
+    });
+  }
+
+  // Шипы
+  if (Math.random() < 0.3 && pw > 200) {
+    const sx = last.x + last.w + gap + 80 + Math.random() * (pw - 150);
+    enemies.push({
+      x: sx, y: GROUND_Y - 12,
+      w: 30, h: 14,
+      alive: true,
+      frame: 0,
+      type: 'spike'
+    });
+  }
+
+  // Свиток
+  if (Math.random() < 0.6) {
+    scrolls.push({
+      x: last.x + last.w + gap + pw / 2,
+      y: GROUND_Y - 60 - Math.random() * 40,
+      r: 12,
+      phase: 0,
+      collected: false
+    });
+  }
+}
+
+function drawBackground() {
+  // Небо
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#1a0a2e');
+  grad.addColorStop(0.5, '#3a1045');
+  grad.addColorStop(1, '#5a1a3a');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Луна
+  ctx.fillStyle = '#fdd';
+  ctx.shadowColor = '#fdd';
+  ctx.shadowBlur = 30;
+  ctx.beginPath();
+  ctx.arc(W - 90, 70, 35, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Облака
+  ctx.fillStyle = 'rgba(80, 40, 100, 0.6)';
+  clouds.forEach(c => {
+    c.x -= c.s * worldSpeed;
+    if (c.x < -80) { c.x = W + 40; c.y = 20 + Math.random() * 100; }
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 20, 0, Math.PI * 2);
+    ctx.arc(c.x + 20, c.y + 5, 25, 0, Math.PI * 2);
+    ctx.arc(c.x + 45, c.y, 18, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Горы (параллакс)
+  ctx.fillStyle = '#2a1545';
+  mountains.forEach(m => {
+    m.x -= worldSpeed * 0.3;
+    if (m.x + m.w < 0) m.x += mountains.length * 150;
+    ctx.beginPath();
+    ctx.moveTo(m.x, GROUND_Y + 20);
+    ctx.lineTo(m.x + m.w / 2, GROUND_Y + 20 - m.h);
+    ctx.lineTo(m.x + m.w, GROUND_Y + 20);
+    ctx.closePath();
+    ctx.fill();
+  });
+}
+
+function drawPlatforms() {
+  platforms.forEach(p => {
+    // Верхняя поверхность
+    ctx.fillStyle = '#4a3060';
+    ctx.fillRect(p.x, p.y, p.w, 8);
+    // Трава/мох
+    ctx.fillStyle = '#2a6a4a';
+    ctx.fillRect(p.x, p.y - 4, p.w, 6);
+    // Тело
+    ctx.fillStyle = '#1a1025';
+    ctx.fillRect(p.x, p.y + 8, p.w, p.h - 8);
+    // Прожилки
+    ctx.strokeStyle = '#2a2040';
+    ctx.lineWidth = 1;
+    for (let i = 20; i < p.w; i += 40) {
+      ctx.beginPath();
+      ctx.moveTo(p.x + i, p.y + 10);
+      ctx.lineTo(p.x + i - 5, p.y + p.h);
+      ctx.stroke();
+    }
+  });
+}
+
+function drawPlayer() {
+  if (player.invuln > 0 && Math.floor(frame / 4) % 2 === 0) return;
+
+  const isSliding = player.sliding;
+  const px = player.x;
+  const py = player.y;
+
+  ctx.save();
+
+  if (isSliding) {
+    ctx.translate(px, py + 10);
+    ctx.rotate(-Math.PI / 2.5);
+  } else {
+    ctx.translate(px, py);
+  }
+
+  const w = player.w, h = isSliding ? player.w : player.h;
+  const bodyH = isSliding ? player.w : player.h;
+
+  // Тень
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.beginPath();
+  ctx.ellipse(0, isSliding ? 8 : player.h/2 + 4, w/2, 4, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // Ноги (анимация бега)
+  const legOffset = player.onGround ? Math.sin(player.runFrame * 0.4) * 6 : 0;
+  ctx.fillStyle = '#1a1a2a';
+  ctx.fillRect(-w/2 + 2, player.h/2 - 8, 8, 10 + legOffset);
+  ctx.fillRect(w/2 - 10, player.h/2 - 8, 8, 10 - legOffset);
+
+  // Тело (чёрная одежда)
+  ctx.fillStyle = '#1a1a2a';
+  ctx.fillRect(-w/2, -h/2, w, h - 4);
+
+  // Пояс
+  ctx.fillStyle = '#a22';
+  ctx.fillRect(-w/2, -h/2 + h * 0.5, w, 4);
+
+  // Голова
+  ctx.fillStyle = '#e8c8a8';
+  ctx.fillRect(-w/2 + 4, -h/2 - 6, w - 8, 14);
+
+  // Маска ниндзя
+  ctx.fillStyle = '#1a1a2a';
+  ctx.fillRect(-w/2, -h/2 - 6, w, 8);
+  ctx.fillRect(-w/2, -h/2 - 6, 6, 14);
+
+  // Глаза
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(w/2 - 12, -h/2 - 2, 5, 3);
+  ctx.fillStyle = '#4af';
+  ctx.fillRect(w/2 - 11, -h/2 - 1, 3, 2);
+
+  // Повязка на голове
+  ctx.fillStyle = '#c33';
+  ctx.fillRect(-w/2, -h/2 - 10, w, 4);
+  // Хвостик повязки
+  ctx.fillRect(-w/2 - 8, -h/2 - 9, 8, 3);
+
+  // Меч на спине
+  ctx.fillStyle = '#666';
+  ctx.fillRect(-w/2 + 6, -h/2 + 2, 3, h - 8);
+  ctx.fillStyle = '#aaa';
+  ctx.fillRect(-w/2 + 5, -h/2 + 2, 5, 3);
+
+  // Атака
+  if (player.attacking && player.attackTimer > 6) {
+    ctx.strokeStyle = '#cff';
+    ctx.lineWidth = 3;
+    ctx.shadowColor = '#8cf';
+    ctx.shadowBlur = 15;
+    ctx.beginPath();
+    ctx.arc(w/2 + 5, 0, 22, -0.8, 0.8);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+
+  ctx.restore();
+}
+
+function drawEnemy(e) {
+  if (!e.alive) return;
+  if (e.type === 'spike') {
+    ctx.fillStyle = '#888';
+    ctx.strokeStyle = '#444';
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 3; i++) {
+      const sx = e.x + i * 10;
+      ctx.beginPath();
+      ctx.moveTo(sx, e.y + e.h);
+      ctx.lineTo(sx + 5, e.y);
+      ctx.lineTo(sx + 10, e.y + e.h);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+    return;
+  }
+  // Враг-ниндзя (красный)
+  ctx.fillStyle = '#a22';
+  ctx.fillRect(e.x, e.y, e.w, e.h);
+  ctx.fillStyle = '#822';
+  ctx.fillRect(e.x, e.y, e.w, 8);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(e.x + 4, e.y + 10, 5, 3);
+  ctx.fillRect(e.x + e.w - 9, e.y + 10, 5, 3);
+  ctx.fillStyle = '#f44';
+  ctx.fillRect(e.x + 5, e.y + 11, 3, 2);
+  ctx.fillRect(e.x + e.w - 8, e.y + 11, 3, 2);
+  // Меч
+  ctx.fillStyle = '#ccc';
+  ctx.fillRect(e.x - 12, e.y + 12, 12, 3);
+}
+
+function drawScroll(s) {
+  if (s.collected) return;
+  ctx.save();
+  ctx.translate(s.x, s.y + Math.sin(s.phase) * 4);
+  ctx.shadowColor = '#fc4';
+  ctx.shadowBlur = 15;
+  // Свиток
+  ctx.fillStyle = '#e8d8a8';
+  ctx.fillRect(-10, -12, 20, 24);
+  ctx.fillStyle = '#8a6a3a';
+  ctx.fillRect(-12, -14, 24, 4);
+  ctx.fillRect(-12, 10, 24, 4);
+  // Иероглиф
+  ctx.strokeStyle = '#a22';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-4, -4); ctx.lineTo(4, -4);
+  ctx.moveTo(0, -4); ctx.lineTo(0, 6);
+  ctx.moveTo(-4, 6); ctx.lineTo(4, 6);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawParticles() {
+  particles.forEach(p => {
+    ctx.globalAlpha = p.life / 20;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x, p.y, p.size, p.size);
+  });
+  ctx.globalAlpha = 1;
+}
+
+function drawGround() {
+  // Земля внизу
+  ctx.fillStyle = '#0a0510';
+  ctx.fillRect(0, GROUND_Y + 20, W, H - GROUND_Y - 20);
+}
+
+function drawHUD() {
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 20px Courier New';
+  ctx.textAlign = 'left';
+  ctx.shadowColor = '#000';
+  ctx.shadowBlur = 4;
+  ctx.fillText(`Свитки: ${score}`, 15, 30);
+  ctx.textAlign = 'right';
+  ctx.fillText('❤️'.repeat(lives), W - 15, 30);
+  ctx.textAlign = 'center';
+  ctx.font = '14px Courier New';
+  ctx.fillStyle = '#f8c';
+  ctx.fillText(`Дистанция: ${Math.floor(distance)}м`, W / 2, 30);
+  ctx.shadowBlur = 0;
+}
+
+function drawMenu() {
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#f4a';
+  ctx.font = 'bold 48px Courier New';
+  ctx.shadowColor = '#f4a';
+  ctx.shadowBlur = 25;
+  ctx.fillText('ПИКСЕЛЬНЫЙ', W/2, H/2 - 70);
+  ctx.fillText('НИНДЗЯ', W/2, H/2 - 20);
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '16px Courier New';
+  ctx.fillText('ПРОБЕЛ / ↑ — прыжок (двойной!)', W/2, H/2 + 40);
+  ctx.fillText('SHIFT / ↓ — подкат', W/2, H/2 + 65);
+  ctx.fillText('X — атака катаной', W/2, H/2 + 90);
+  ctx.fillText('Собирай свитки 📜, руби врагов 🥷', W/2, H/2 + 115);
+
+  ctx.fillStyle = '#ff0';
+  ctx.font = 'bold 22px Courier New';
+  if (Math.floor(frame / 30) % 2 === 0)
+    ctx.fillText('НАЖМИ ПРОБЕЛ', W/2, H/2 + 175);
+
+  ctx.fillStyle = '#8af';
+  ctx.font = '16px Courier New';
+  ctx.fillText(`Лучший результат: ${best}`, W/2, H - 25);
+}
+
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(0,0,0,0.8)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#f44';
+  ctx.font = 'bold 52px Courier New';
+  ctx.shadowColor = '#f44';
+  ctx.shadowBlur = 25;
+  ctx.fillText('ПОРАЖЕНИЕ', W/2, H/2 - 40);
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '22px Courier New';
+  ctx.fillText(`Свитков: ${score}`, W/2, H/2 + 15);
+  ctx.fillText(`Дистанция: ${Math.floor(distance)}м`, W/2, H/2 + 50);
+
+  ctx.fillStyle = '#ff0';
+  ctx.font = '18px Courier New';
+  ctx.fillText(`Лучший: ${best}`, W/2, H/2 + 85);
+
+  if (Math.floor(frame / 30) % 2 === 0) {
+    ctx.fillStyle = '#f4a';
+    ctx.font = 'bold 20px Courier New';
+    ctx.fillText('ПРОБЕЛ — заново', W/2, H/2 + 145);
+  }
+}
+
+// === Логика ===
+function update() {
+  frame++;
+  player.runFrame++;
+  distance += worldSpeed * 0.05;
+
+  // Ускорение
+  worldSpeed = 5 + Math.min(6, distance / 100);
+
+  // Гравитация
+  player.vy += GRAVITY;
+  player.y += player.vy;
+
+  // Приземление
+  const wasOnGround = player.onGround;
+  player.onGround = false;
+  for (const p of platforms) {
+    if (player.x + player.w/2 > p.x && player.x - player.w/2 < p.x + p.w) {
+      if (player.vy >= 0 && player.y + player.h/2 >= p.y && player.y + player.h/2 <= p.y + 30) {
+        player.y = p.y - player.h/2;
+        player.vy = 0;
+        player.onGround = true;
+        player.jumps = 0;
+        break;
+      }
+    }
+  }
+  if (player.onGround && !wasOnGround) {
+    for (let i = 0; i < 8; i++) spawnParticle(player.x, player.y + player.h/2, '#8cf');
+  }
+
+  // Если упал в пропасть
+  if (player.y > H + 50) {
+    loseLife();
+    player.y = GROUND_Y;
+    player.vy = 0;
+    player.x = 120;
+  }
+
+  // Подкат
+  if (player.sliding) {
+    player.slideTimer--;
+    if (player.slideTimer <= 0) player.sliding = false;
+  }
+
+  // Атака
+  if (player.attacking) {
+    player.attackTimer--;
+    if (player.attackTimer <= 0) player.attacking = false;
+  }
+
+  // Неуязвимость
+  if (player.invuln > 0) player.invuln--;
+
+  // Прокрутка мира
+  platforms.forEach(p => p.x -= worldSpeed);
+  enemies.forEach(e => e.x -= worldSpeed);
+  scrolls.forEach(s => s.x -= worldSpeed);
+  groundOffset = (groundOffset + worldSpeed) % 40;
+
+  // Удаление ушедших
+  platforms = platforms.filter(p => p.x + p.w > -100);
+  enemies = enemies.filter(e => e.x + e.w > -100);
+  scrolls = scrolls.filter(s => s.x > -50 && !s.collected);
+
+  // Спавн нового
+  const lastP = platforms[platforms.length - 1];
+  if (lastP && lastP.x + lastP.w < W + 200) {
+    spawnObstacles();
+  }
+  // Спавн первой платформы
+  if (platforms.length === 0) {
+    platforms.push({ x: W, y: GROUND_Y + 20, w: 200 + Math.random()*150, h: 40 });
+  }
+
+  // Коллизии с врагами
+  enemies.forEach(e => {
+    if (!e.alive) return;
+    const px = player.x, py = player.y;
+    const pw = player.w / 2, ph = (player.sliding ? player.w : player.h) / 2;
+    const py_top = player.sliding ? py - ph : py - ph;
+
+    if (px + pw > e.x && px - pw < e.x + e.w &&
+        py + ph > e.y && py - ph < e.y + e.h) {
+      // Атака?
+      if (player.attacking && player.attackTimer > 4) {
+        e.alive = false;
+        score += 2;
+        for (let i = 0; i < 12; i++) spawnParticle(e.x + e.w/2, e.y + e.h/2, '#f44');
+      } else if (player.invuln <= 0) {
+        loseLife();
+      }
+    }
+  });
+  enemies = enemies.filter(e => e.alive);
+
+  // Сбор свитков
+  scrolls.forEach(s => {
+    const dx = s.x - player.x;
+    const dy = s.y - player.y;
+    if (Math.sqrt(dx*dx + dy*dy) < s.r + 15) {
+      s.collected = true;
+      score += 1;
+      for (let i = 0; i < 10; i++) spawnParticle(s.x, s.y, '#fc4');
+    }
+    s.phase += 0.15;
+  });
+
+  // Частицы
+  particles.forEach(p => {
+    p.x += p.vx - worldSpeed * 0.3;
+    p.y += p.vy;
+    p.vy += 0.2;
+    p.life--;
+  });
+  particles = particles.filter(p => p.life > 0);
+}
+
+function loseLife() {
+  lives--;
+  player.invuln = 90;
+  for (let i = 0; i < 20; i++) spawnParticle(player.x, player.y, '#f44');
+  if (lives <= 0) {
+    state = 'gameover';
+    if (score > best) {
+      best = score;
+      localStorage.setItem('ninjaBest', best);
+    }
+  }
+}
+
+function loop() {
+  drawBackground();
+
+  if (state === 'playing') {
+    update();
+    drawGround();
+    drawPlatforms();
+    scrolls.forEach(drawScroll);
+    enemies.forEach(drawEnemy);
+    drawParticles();
+    drawPlayer();
+    drawHUD();
+  } else if (state === 'menu') {
+    frame++;
+    // Демо-персонаж бежит
+    player.runFrame++;
+    drawGround();
+    drawPlatforms();
+    drawPlayer();
+    drawMenu();
+  } else if (state === 'gameover') {
+    frame++;
+    drawGround();
+    drawPlatforms();
+    enemies.forEach(drawEnemy);
+    drawGameOver();
+  }
+
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+  </html>
